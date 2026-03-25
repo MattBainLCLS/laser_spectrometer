@@ -123,6 +123,7 @@ class SpectrometerWindow(QMainWindow):
         self.worker = None
         self.interval_worker = None
         self.last_data = None
+        self.ref_spectrum = None
 
         self._build_ui()
         self._connect_spectrometer()
@@ -205,7 +206,9 @@ class SpectrometerWindow(QMainWindow):
         self.ax.set_ylabel("Intensity (ADC counts)")
         self.ax.set_title("Spectrum")
         self.ax.grid(True)
-        self.line, = self.ax.plot([], [], linewidth=1)
+        self.ref_line, = self.ax.plot([], [], linewidth=1, color="C1",
+                                      alpha=0.8, label="Reference", zorder=1)
+        self.line, = self.ax.plot([], [], linewidth=1, label="Live", zorder=2)
         self.canvas = FigureCanvasQTAgg(spec_fig)
         self.toolbar = NavigationToolbar2QT(self.canvas, self)
 
@@ -250,6 +253,17 @@ class SpectrometerWindow(QMainWindow):
         self.td_btn.setCheckable(True)
         self.td_btn.clicked.connect(self.toggle_time_domain)
         ctrl.addWidget(self.td_btn)
+
+        self.pin_btn = QPushButton("Pin Reference")
+        self.pin_btn.setFixedWidth(110)
+        self.pin_btn.clicked.connect(self.pin_reference)
+        ctrl.addWidget(self.pin_btn)
+
+        self.clear_ref_btn = QPushButton("Clear Reference")
+        self.clear_ref_btn.setFixedWidth(120)
+        self.clear_ref_btn.clicked.connect(self.clear_reference)
+        self.clear_ref_btn.setEnabled(False)
+        ctrl.addWidget(self.clear_ref_btn)
 
         self.save_png_btn = QPushButton("Save PNG")
         self.save_png_btn.setFixedWidth(90)
@@ -542,6 +556,23 @@ class SpectrometerWindow(QMainWindow):
     # -----------------------------------------------------------------------
     # Slots
     # -----------------------------------------------------------------------
+
+    def pin_reference(self):
+        if self.last_data is None:
+            QMessageBox.warning(self, "No data", "Acquire a spectrum first.")
+            return
+        self.ref_spectrum = self.last_data.Spectrum
+        self.ref_line.set_data(self.wavelengths, self.ref_spectrum)
+        self.canvas.draw_idle()
+        self.clear_ref_btn.setEnabled(True)
+        self.status_bar.showMessage("Reference pinned.", 3000)
+
+    def clear_reference(self):
+        self.ref_spectrum = None
+        self.ref_line.set_data([], [])
+        self.canvas.draw_idle()
+        self.clear_ref_btn.setEnabled(False)
+        self.status_bar.showMessage("Reference cleared.", 3000)
 
     def _on_spectrum(self, data):
         self.last_data = data
