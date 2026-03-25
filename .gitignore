@@ -1,0 +1,17 @@
+# Virtual environment
+.env_spectrometer/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Output files
+spectra/
+*.png
+*.csv
+
+# macOS
+.DS_Store
