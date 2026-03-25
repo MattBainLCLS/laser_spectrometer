@@ -55,7 +55,74 @@ source .env_spectrometer/bin/activate
 pip install -r requirements.txt
 ```
 
-### 6. Avantes spectrometer (optional)
+### 6. Create the macOS Launchpad app (optional)
+
+To launch the GUI directly from macOS Launchpad or Spotlight, create a minimal `.app` bundle.
+Run these commands from the repository root, replacing the path in the launcher script if you cloned to a different location.
+
+```bash
+# Create the bundle structure
+mkdir -p "/Applications/Laser Spectrometer.app/Contents/MacOS"
+mkdir -p "/Applications/Laser Spectrometer.app/Contents/Resources"
+
+# Write the launcher script
+cat > "/Applications/Laser Spectrometer.app/Contents/MacOS/launcher" << 'EOF'
+#!/bin/bash
+cd /Users/YOUR_USERNAME/code/laser_spectrometer
+source .env_spectrometer/bin/activate
+python spectrometer_gui.py
+EOF
+
+# Make it executable
+chmod +x "/Applications/Laser Spectrometer.app/Contents/MacOS/launcher"
+
+# Write Info.plist
+cat > "/Applications/Laser Spectrometer.app/Contents/Info.plist" << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Laser Spectrometer</string>
+    <key>CFBundleDisplayName</key>
+    <string>Laser Spectrometer</string>
+    <key>CFBundleIdentifier</key>
+    <string>uk.ac.lcls.laser-spectrometer</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleExecutable</key>
+    <string>launcher</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>11.0</string>
+</dict>
+</plist>
+EOF
+```
+
+> **Edit the path** — replace `/Users/YOUR_USERNAME/code/laser_spectrometer` in the launcher script with the absolute path to your clone.
+
+To generate the spectrum icon (requires Pillow, already installed via `requirements.txt`):
+
+```bash
+source .env_spectrometer/bin/activate
+python make_icon.py
+```
+
+Finally, tell Launchpad to pick up the new app:
+
+```bash
+touch "/Applications/Laser Spectrometer.app"
+```
+
+The app will appear in Launchpad within a few seconds.
+
+---
+
+### 7. Avantes spectrometer (optional)
 
 The Avantes SDK wrapper (`Avantes/avaspec.py`) is included, but the compiled native library is **not** bundled for licensing reasons.
 
