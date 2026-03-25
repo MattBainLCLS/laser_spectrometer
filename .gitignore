@@ -13,5 +13,10 @@ spectra/
 *.png
 *.csv
 
+# Avantes native libraries — not redistributable, obtain from Avantes SDK
+Avantes/*.dylib
+Avantes/*.so*
+Avantes/*.dll
+
 # macOS
 .DS_Store

@@ -16,9 +16,60 @@ matplotlib.use("QtAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 
-sys.path.append("NioLink/Python/pyrgbdriverkit-0.3.7")
-from rgbdriverkit.qseriesdriver import Qseries
-from rgbdriverkit.calibratedspectrometer import SpectrometerProcessing
+from spectrometers import find_spectrometer
+
+
+# ---------------------------------------------------------------------------
+# Time-domain computation (module-level so workers can call it off-thread)
+# ---------------------------------------------------------------------------
+
+def compute_time_domain(wavelengths_nm, spectrum, smooth_sigma=0):
+    """
+    Reconstruct time-domain pulse intensity from a measured spectrum.
+
+    Steps:
+      1. Convert wavelength (nm) → optical frequency (Hz): f = c / λ
+      2. Interpolate I(f) onto a uniform frequency grid (N points, spacing df)
+      3. Gaussian-smooth I(f) to suppress noise before taking sqrt
+      4. Field amplitude:  E(f) = sqrt(I(f))
+      5. Zero-pad E(f) symmetrically by PAD_FACTOR to refine dt
+      6. Time-domain field: E(t) = IFFT( E_padded(f) )
+      7. Return t (fs), |E(t)|², and dt (fs)
+    """
+    PAD_FACTOR = 5
+    c = 2.998e8  # m/s
+
+    wl_m = np.asarray(wavelengths_nm) * 1e-9
+    freq = c / wl_m
+
+    order = np.argsort(freq)
+    freq_s = freq[order]
+    intens_s = np.maximum(np.asarray(spectrum)[order], 0.0)
+
+    n = int(2 ** np.ceil(np.log2(len(freq_s))))
+    freq_u = np.linspace(freq_s[0], freq_s[-1], n)
+    df = freq_u[1] - freq_u[0]
+
+    intens_u = np.maximum(np.interp(freq_u, freq_s, intens_s), 0.0)
+
+    if smooth_sigma > 0:
+        half = int(4 * smooth_sigma)
+        k = np.arange(-half, half + 1, dtype=float)
+        kernel = np.exp(-k ** 2 / (2 * smooth_sigma ** 2))
+        kernel /= kernel.sum()
+        intens_u = np.maximum(np.convolve(intens_u, kernel, mode="same"), 0.0)
+
+    E_f = np.sqrt(intens_u)
+
+    m = int(2 ** np.ceil(np.log2(PAD_FACTOR * n)))
+    pad_left = (m - n) // 2
+    E_f_padded = np.pad(E_f, (pad_left, m - n - pad_left))
+
+    e_t = np.fft.fftshift(np.fft.ifft(np.fft.ifftshift(E_f_padded)))
+    t_fs = np.fft.fftshift(np.fft.fftfreq(m, d=df)) * 1e15
+    dt_fs = 1.0 / (m * df) * 1e15
+
+    return t_fs, np.abs(e_t) ** 2, dt_fs
 
 
 # ---------------------------------------------------------------------------
@@ -27,6 +78,7 @@ from rgbdriverkit.calibratedspectrometer import SpectrometerProcessing
 
 class AcquisitionWorker(QThread):
     spectrum_ready = pyqtSignal(object)
+    td_ready = pyqtSignal(object, object, float)  # t_fs, I_t, dt_fs
     error = pyqtSignal(str)
 
     def __init__(self, spec, continuous=False):
@@ -34,19 +86,37 @@ class AcquisitionWorker(QThread):
         self.spec = spec
         self.continuous = continuous
         self._running = True
+        self.td_params = None   # set to (wavelengths, smooth_sigma) to enable TD
 
     def stop(self):
         self._running = False
 
     def run(self):
+        _spec_last = 0.0
+        _td_last = 0.0
         try:
             while self._running:
-                self.spec.start_exposure(1)
-                while not self.spec.available_spectra:
+                self.spec.start_exposure()
+                while not self.spec.is_data_ready():
                     if not self._running:
                         return
                     time.sleep(0.01)
-                self.spectrum_ready.emit(self.spec.get_spectrum_data())
+                data = self.spec.get_spectrum()
+
+                now = time.monotonic()
+                if now - _spec_last >= 0.05:        # cap spectrum plot at 20 fps
+                    self.spectrum_ready.emit(data)
+                    _spec_last = now
+
+                td_params = self.td_params
+                if td_params is not None and now - _td_last >= 0.05:
+                    wavelengths, sigma = td_params
+                    t_fs, I_t, dt_fs = compute_time_domain(
+                        wavelengths, data.spectrum, smooth_sigma=sigma
+                    )
+                    self.td_ready.emit(t_fs, I_t, dt_fs)
+                    _td_last = now
+
                 if not self.continuous:
                     break
         except Exception as e:
@@ -80,14 +150,14 @@ class IntervalWorker(QThread):
                     break
 
                 t0 = time.monotonic()
-                self.spec.start_exposure(1)
-                while not self.spec.available_spectra:
+                self.spec.start_exposure()
+                while not self.spec.is_data_ready():
                     if not self._running:
                         self.finished_acquisition.emit(index)
                         return
                     time.sleep(0.01)
 
-                data = self.spec.get_spectrum_data()
+                data = self.spec.get_spectrum()
                 self.spectrum_ready.emit(data, index)
                 index += 1
 
@@ -346,14 +416,12 @@ class SpectrometerWindow(QMainWindow):
     # -----------------------------------------------------------------------
 
     def _connect_spectrometer(self):
-        devices = Qseries.search_devices()
-        if not devices:
-            QMessageBox.critical(self, "No device", "No Qseries spectrometer found.")
+        self.spec = find_spectrometer()
+        if self.spec is None:
+            QMessageBox.critical(self, "No device", "No supported spectrometer found.\n\nChecked: RGB Photonics Qseries, Avantes.")
             sys.exit(1)
 
-        self.spec = Qseries(devices[0])
         self.spec.open()
-        self.spec.processing_steps = SpectrometerProcessing.AdjustOffset
 
         self.wavelengths = self.spec.get_wavelengths()
         self.ax.set_xlim(self.wavelengths[0], self.wavelengths[-1])
@@ -363,7 +431,7 @@ class SpectrometerWindow(QMainWindow):
 
         self.status_bar.showMessage(
             f"Connected: {self.spec.model_name}  |  S/N: {self.spec.serial_number}  |  "
-            f"FW: {self.spec.software_version}  |  "
+            f"FW: {self.spec.firmware_version}  |  "
             f"Exposure range: {self.spec.min_exposure_time:.4f}–{self.spec.max_exposure_time:.1f} s"
         )
 
@@ -377,7 +445,10 @@ class SpectrometerWindow(QMainWindow):
     def _start_worker(self, continuous):
         self._apply_exposure()
         self.worker = AcquisitionWorker(self.spec, continuous=continuous)
+        if self.td_panel.isVisible():
+            self.worker.td_params = (self.wavelengths, self.td_smooth_spin.value())
         self.worker.spectrum_ready.connect(self._on_spectrum)
+        self.worker.td_ready.connect(self._on_td_ready)
         self.worker.error.connect(self._on_error)
         self.worker.finished.connect(self._on_worker_finished)
         self.worker.start()
@@ -405,81 +476,30 @@ class SpectrometerWindow(QMainWindow):
         self.td_btn.setText("Hide Time Domain" if checked else "Show Time Domain")
         delta = self._td_panel_width + self.plot_layout.spacing()
         self.resize(self.width() + (delta if checked else -delta), self.height())
+        if self.worker and self.worker.isRunning():
+            self.worker.td_params = (self.wavelengths, self.td_smooth_spin.value()) if checked else None
         if checked and self.last_data is not None:
             self._update_time_domain(self.last_data)
 
-    def _compute_time_domain(self, wavelengths_nm, spectrum, smooth_sigma=0):
-        """
-        Reconstruct time-domain pulse intensity from a measured spectrum.
-
-        Steps:
-          1. Convert wavelength (nm) → optical frequency (Hz): f = c / λ
-          2. Interpolate I(f) onto a uniform frequency grid (N points, spacing df)
-          3. Gaussian-smooth I(f) to suppress noise before taking sqrt
-          4. Field amplitude:  E(f) = sqrt(I(f))
-          5. Zero-pad E(f) symmetrically by PAD_FACTOR to refine dt:
-               dt = 1 / (PAD_FACTOR · N · df)  →  ~0.1 fs
-          6. Time-domain field: E(t) = IFFT( E_padded(f) )
-          7. Return t (fs), |E(t)|², and dt (fs)
-        """
-        PAD_FACTOR = 20
-        c = 2.998e8  # m/s
-
-        wl_m = np.asarray(wavelengths_nm) * 1e-9
-        freq = c / wl_m                        # Hz, decreasing with pixel index
-
-        # Sort into ascending frequency order
-        order = np.argsort(freq)
-        freq_s = freq[order]
-        intens_s = np.maximum(np.asarray(spectrum)[order], 0.0)
-
-        # Uniform frequency grid — round up to next power of 2 for FFT efficiency
-        n = int(2 ** np.ceil(np.log2(len(freq_s))))
-        freq_u = np.linspace(freq_s[0], freq_s[-1], n)
-        df = freq_u[1] - freq_u[0]
-
-        intens_u = np.interp(freq_u, freq_s, intens_s)
-        intens_u = np.maximum(intens_u, 0.0)
-
-        # Gaussian smoothing of the intensity spectrum
-        if smooth_sigma > 0:
-            half = int(4 * smooth_sigma)
-            k = np.arange(-half, half + 1, dtype=float)
-            kernel = np.exp(-k ** 2 / (2 * smooth_sigma ** 2))
-            kernel /= kernel.sum()
-            intens_u = np.convolve(intens_u, kernel, mode="same")
-            intens_u = np.maximum(intens_u, 0.0)
-
-        E_f = np.sqrt(intens_u)
-
-        # Zero-pad symmetrically: assert E(f) = 0 outside the measured bandwidth.
-        # Round padded length up to next power of 2 so both N and M are powers of 2.
-        m = int(2 ** np.ceil(np.log2(PAD_FACTOR * n)))
-        pad_left = (m - n) // 2
-        pad_right = m - n - pad_left
-        E_f_padded = np.pad(E_f, (pad_left, pad_right))
-
-        # IFFT with proper shifting so t=0 is centred
-        e_t = np.fft.fftshift(np.fft.ifft(np.fft.ifftshift(E_f_padded)))
-
-        # Time axis and resolution in femtoseconds
-        t_fs = np.fft.fftshift(np.fft.fftfreq(m, d=df)) * 1e15
-        dt_fs = 1.0 / (m * df) * 1e15
-
-        return t_fs, np.abs(e_t) ** 2, dt_fs
-
-    def _update_time_domain(self, data):
-        sigma = self.td_smooth_spin.value()
-        t_fs, I_t, dt_fs = self._compute_time_domain(self.wavelengths, data.Spectrum, smooth_sigma=sigma)
+    def _on_td_ready(self, t_fs, I_t, dt_fs):
+        """Receive pre-computed TD result from the worker thread and update the plot."""
         self.td_line.set_data(t_fs, I_t)
         self.td_ax.relim()
         self.td_ax.autoscale_view()
-        half = self.td_window_spin.value()
-        self.td_ax.set_xlim(-half, half)
+        self.td_ax.set_xlim(-self.td_window_spin.value(), self.td_window_spin.value())
         self.td_canvas.draw_idle()
         self.td_dt_label.setText(f"dt: {dt_fs * 1000:.0f} as" if dt_fs < 1 else f"dt: {dt_fs:.2f} fs")
 
+    def _update_time_domain(self, data):
+        """On-demand TD update (single grab, toggle-on with existing data, controls changed)."""
+        t_fs, I_t, dt_fs = compute_time_domain(
+            self.wavelengths, data.spectrum, smooth_sigma=self.td_smooth_spin.value()
+        )
+        self._on_td_ready(t_fs, I_t, dt_fs)
+
     def _on_td_controls_changed(self):
+        if self.worker and self.worker.isRunning():
+            self.worker.td_params = (self.wavelengths, self.td_smooth_spin.value())
         if self.last_data is not None:
             self._update_time_domain(self.last_data)
 
@@ -530,7 +550,7 @@ class SpectrometerWindow(QMainWindow):
         self._on_spectrum(data)
 
         output_dir = self.outdir_edit.text().strip() or "spectra"
-        ts = data.TimeStamp.strftime("%Y%m%d_%H%M%S_%f")[:-3]
+        ts = data.timestamp.strftime("%Y%m%d_%H%M%S_%f")[:-3]
         stem = os.path.join(output_dir, f"{self.spec.serial_number}_{ts}_{index:04d}")
         fmt = self.format_combo.currentText()
 
@@ -561,7 +581,7 @@ class SpectrometerWindow(QMainWindow):
         if self.last_data is None:
             QMessageBox.warning(self, "No data", "Acquire a spectrum first.")
             return
-        self.ref_spectrum = self.last_data.Spectrum
+        self.ref_spectrum = self.last_data.spectrum
         self.ref_line.set_data(self.wavelengths, self.ref_spectrum)
         self.canvas.draw_idle()
         self.clear_ref_btn.setEnabled(True)
@@ -576,20 +596,17 @@ class SpectrometerWindow(QMainWindow):
 
     def _on_spectrum(self, data):
         self.last_data = data
-        self.line.set_data(self.wavelengths, data.Spectrum)
+        self.line.set_data(self.wavelengths, data.spectrum)
         self.ax.relim()
         self.ax.autoscale_view(scalex=False)
         self.canvas.draw_idle()
 
-        if self.td_panel.isVisible():
-            self._update_time_domain(data)
-
-        load = data.LoadLevel
+        load = data.load_level
         warn = "  ⚠ OVERLOAD — reduce exposure" if load > 1 else ""
         self.status_bar.showMessage(
             f"{self.spec.model_name}  |  S/N: {self.spec.serial_number}  |  "
-            f"Exposure: {data.ExposureTime:.4f} s  |  Load: {load:.2f}{warn}  |  "
-            f"{data.TimeStamp.strftime('%H:%M:%S.%f')[:-3]}"
+            f"Exposure: {data.exposure_time:.4f} s  |  Load: {load:.2f}{warn}  |  "
+            f"{data.timestamp.strftime('%H:%M:%S.%f')[:-3]}"
         )
 
     def _on_error(self, msg):
@@ -615,10 +632,10 @@ class SpectrometerWindow(QMainWindow):
     def _write_csv(self, path, data):
         with open(path, "w") as f:
             f.write(f"# {self.spec.model_name}  S/N: {self.spec.serial_number}\n")
-            f.write(f"# Timestamp: {data.TimeStamp}\n")
-            f.write(f"# Exposure: {data.ExposureTime} s  Averaging: {data.Averaging}\n")
+            f.write(f"# Timestamp: {data.timestamp}\n")
+            f.write(f"# Exposure: {data.exposure_time} s  Averaging: {data.averaging}\n")
             f.write("wavelength_nm,intensity\n")
-            for wl, intensity in zip(self.wavelengths, data.Spectrum):
+            for wl, intensity in zip(self.wavelengths, data.spectrum):
                 f.write(f"{wl:.4f},{intensity:.4f}\n")
 
     def save_png(self):

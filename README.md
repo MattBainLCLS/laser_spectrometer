@@ -55,6 +55,23 @@ source .env_spectrometer/bin/activate
 pip install -r requirements.txt
 ```
 
+### 6. Avantes spectrometer (optional)
+
+The Avantes SDK wrapper (`Avantes/avaspec.py`) is included, but the compiled native library is **not** bundled for licensing reasons.
+
+To use an Avantes device:
+
+1. Download the Avantes SDK from [avantes.com/support/software](https://www.avantes.com/support/software/)
+2. Copy the native library files into the `Avantes/` folder of this project:
+
+   | Platform | Files to copy |
+   |---|---|
+   | macOS | `libavs.0.dylib` and `libavs.9.x.x.x.dylib` |
+   | Linux | `libavs.so.0` |
+   | Windows | `avaspecx64.dll` (64-bit) or `avaspec.dll` (32-bit) |
+
+The library loader checks the `Avantes/` folder first, then falls back to `/usr/local/lib/`. If the library is missing a clear error message will be shown at startup.
+
 ---
 
 ## Usage
