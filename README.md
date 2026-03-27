@@ -73,7 +73,61 @@ The virtual environment (step 5) must be set up before running this.
 
 ---
 
-### 7. Avantes spectrometer (optional)
+### 7. Thorlabs KDC101 delay stage (optional)
+
+The stage controller communicates directly via USB using the FTDI protocol — **no FTDI VCP driver is required**. You do need `libftdi` installed via Homebrew and a symlink so the Python bindings can find it.
+
+#### a. Install libftdi
+
+```bash
+brew install libftdi
+```
+
+#### b. Create the library symlink
+
+Homebrew installs `libftdi1.dylib` but the Python bindings look for `libftdi.dylib`:
+
+```bash
+ln -sf /opt/homebrew/lib/libftdi1.dylib /opt/homebrew/lib/libftdi.dylib
+```
+
+> **Intel Mac:** replace `/opt/homebrew` with `/usr/local` in the path above.
+
+The Python packages (`pylablib`, `pylibftdi`, `pyserial`) are included in `requirements.txt` and installed in step 5.
+
+#### c. Hardware setup
+
+1. Connect the KDC101's power supply — USB alone is not enough to power it.
+2. Connect the KDC101 to your Mac via USB (mini-USB port on the back of the controller).
+3. Verify the Mac can see it:
+
+```bash
+python3 -c "import usb.core; d = usb.core.find(idVendor=0x0403, idProduct=0xfaf0); print('Found' if d else 'Not found')"
+```
+
+#### d. Run the stage GUI
+
+```bash
+source .env_spectrometer/bin/activate
+python stage_gui.py
+```
+
+**Controls:**
+
+| Control | Description |
+|---|---|
+| Position display | Live readout in mm; shows delay in fs once t0 is set |
+| Home Stage | Sends the stage to its home position (run this first) |
+| Jog ◀ / ▶ | Move relative to current position by the set step size |
+| Go To Position | Move to an absolute position in mm |
+| Set t0 | Marks the current position as time-zero for delay calculations |
+| Delay Scan | Sweep over a range of delays (in fs) relative to t0 |
+
+> **Note:** The stage must be homed at least once after power-on before absolute moves will be accurate.
+
+---
+
+### 8. Avantes spectrometer (optional)
 
 The Avantes SDK wrapper (`Avantes/avaspec.py`) is included, but the compiled native library is **not** bundled for licensing reasons.
 
@@ -154,6 +208,23 @@ If `pyusb` cannot find `libusb` at runtime, reinstall via Homebrew and confirm t
 brew reinstall libusb
 ls /opt/homebrew/lib/libusb*   # Apple Silicon
 ls /usr/local/lib/libusb*      # Intel Mac
+```
+
+### KDC101 stage not found
+
+If the USB check above prints "Not found", confirm:
+- The controller is powered on (green LED on front panel)
+- The USB cable is plugged in to the mini-USB port on the **back** of the KDC101
+- Run `system_profiler SPUSBDataType | grep -A5 "Thorlabs"` to confirm the Mac sees it at the USB level
+
+If it appears in `system_profiler` but `pyusb` returns "Not found", check that `pyusb` and `libusb` are installed correctly (see the libusb step above).
+
+### libftdi symlink missing
+
+If you see `NameError: name 'ftdi' is not defined` when running the stage GUI, the symlink from step 7b is missing or points to the wrong place. Re-run:
+
+```bash
+ln -sf /opt/homebrew/lib/libftdi1.dylib /opt/homebrew/lib/libftdi.dylib
 ```
 
 ### Linux udev rules
