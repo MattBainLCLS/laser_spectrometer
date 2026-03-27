@@ -6,6 +6,8 @@ Add new hardware by subclassing StageBase and registering a
 discovery call in find_stage().
 """
 
+import os
+import sys
 import struct
 import time
 from abc import ABC, abstractmethod
@@ -47,6 +49,9 @@ class StageBase(ABC):
 
     @abstractmethod
     def get_position(self) -> float: ...
+
+    @abstractmethod
+    def is_homed(self) -> bool: ...
 
 
 # ── Thorlabs KDC101 implementation ────────────────────────────────────────────
@@ -106,6 +111,7 @@ class KDC101Stage(StageBase):
         self._counts_per_mm, self._max_pos = self._SCALES[scale]
         self._scale_name = scale
         self._dev = None
+        self._homed = False
 
     # ── StageBase properties ──────────────────────────────────────────────────
 
@@ -206,6 +212,10 @@ class KDC101Stage(StageBase):
     def home(self):
         self._write(self._short_msg(self._MGMSG_MOT_MOVE_HOME, self._CHAN))
         self._wait_for(self._MGMSG_MOT_MOVE_HOMED, timeout=60)
+        self._homed = True
+
+    def is_homed(self) -> bool:
+        return self._homed
 
     def move_to(self, position_mm: float):
         position_mm = max(self.min_position,
@@ -236,14 +246,122 @@ class KDC101Stage(StageBase):
         }
 
 
+# ── Xeryon implementation ─────────────────────────────────────────────────────
+
+class XeryonStage(StageBase):
+    """
+    Xeryon piezo stage controller.
+
+    Wraps the Xeryon Python library (Xeryon/Xeryon.py).
+    The controller auto-detects its USB serial port via vendor ID 04D8.
+
+    Parameters
+    ----------
+    stage_type : str
+        Stage model name matching a Xeryon Stage enum member, e.g. "XLS_312".
+    axis_letter : str
+        Axis identifier as defined in the settings file, e.g. "X".
+    settings_file : str | None
+        Path to the settings_default.txt file supplied with the stage.
+        Defaults to Xeryon/settings_default.txt alongside this file.
+    max_position : float
+        Travel limit in mm (used when the settings file does not define HLIM).
+    """
+
+    _XERYON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "xeryon")
+
+    def __init__(self, stage_type: str = "XLS_78_3N",
+                 axis_letter: str = "X",
+                 settings_file: str | None = None,
+                 min_position: float = -12.5,
+                 max_position: float = 12.5):
+        self._stage_type    = stage_type
+        self._axis_letter   = axis_letter
+        self._settings_file = settings_file  # None = don't send settings
+        self._min_pos       = min_position
+        self._max_pos       = max_position
+        self._controller    = None
+        self._axis          = None
+
+    @property
+    def model_name(self) -> str:
+        return f"Xeryon {self._stage_type}"
+
+    @property
+    def min_position(self) -> float:
+        return self._min_pos
+
+    @property
+    def max_position(self) -> float:
+        return self._max_pos
+
+    def open(self):
+        if self._XERYON_DIR not in sys.path:
+            sys.path.insert(0, self._XERYON_DIR)
+
+        import Xeryon as _X
+        # Suppress the library's console chatter
+        _X.OUTPUT_TO_CONSOLE = False
+
+        # If no settings file is provided, rely on settings already stored
+        # on the controller and skip sending them on startup.
+        if self._settings_file is None:
+            _X.AUTO_SEND_SETTINGS = False
+
+        controller = _X.Xeryon()   # port=None → auto-detect via vendor ID 04D8
+        stage_enum = getattr(_X.Stage, self._stage_type)
+        axis = controller.addAxis(stage_enum, self._axis_letter)
+        controller.start(external_settings_default=self._settings_file)
+
+        axis.setUnits(_X.Units.mm)
+
+        self._controller = controller
+        self._axis       = axis
+        self._X          = _X
+
+    def close(self):
+        if self._controller is not None:
+            try:
+                self._controller.stop()
+            except Exception:
+                pass
+            self._controller = None
+            self._axis       = None
+
+    def home(self):
+        self._axis.findIndex()
+
+    def is_homed(self) -> bool:
+        return self._axis.isEncoderValid()
+
+    def move_to(self, position_mm: float):
+        position_mm = max(self.min_position,
+                          min(self.max_position, position_mm))
+        self._axis.setDPOS(position_mm)
+
+    def get_position(self) -> float:
+        return float(self._axis.getEPOS())
+
+
 # ── Discovery ─────────────────────────────────────────────────────────────────
 
 def find_stage(scale: str = "MTS25-Z8") -> StageBase | None:
     """Try each known stage controller; return an opened instance or None."""
+
+    # Thorlabs KDC101
     try:
         stage = KDC101Stage(scale=scale)
         stage.open()
         return stage
     except Exception:
         pass
+
+    # Xeryon XLS-3 (auto-detects serial port via USB vendor ID 04D8)
+    try:
+        stage = XeryonStage(stage_type="XLS_78_3N")
+        stage.open()
+        return stage
+    except Exception:
+        pass
+
     return None
