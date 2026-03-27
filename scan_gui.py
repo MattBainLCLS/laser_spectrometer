@@ -30,7 +30,7 @@ matplotlib.use("QtAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 
-import stage as st
+from stages import StageBase, find_stage
 from spectrometers import find_spectrometer, SpectrometerBase
 
 C_MM_PER_FS = 2.99792458e-4   # mm per femtosecond
@@ -48,13 +48,13 @@ class StageWorker(QThread):
     finished = pyqtSignal()
     error    = pyqtSignal(str)
 
-    def __init__(self, dev, command, *args):
+    def __init__(self, command, *args):
         super().__init__()
-        self._dev, self._command, self._args = dev, command, args
+        self._command, self._args = command, args
 
     def run(self):
         try:
-            self._command(self._dev, *self._args)
+            self._command(*self._args)
             self.finished.emit()
         except Exception as e:
             self.error.emit(str(e))
@@ -68,10 +68,10 @@ class ScanWorker(QThread):
     finished  = pyqtSignal()
     error     = pyqtSignal(str)
 
-    def __init__(self, stage_dev, spec: SpectrometerBase,
+    def __init__(self, stage: StageBase, spec: SpectrometerBase,
                  positions_mm, delays_fs):
         super().__init__()
-        self._dev          = stage_dev
+        self._stage        = stage
         self._spec         = spec
         self._positions_mm = positions_mm
         self._delays_fs    = delays_fs
@@ -87,8 +87,8 @@ class ScanWorker(QThread):
                     zip(self._positions_mm, self._delays_fs)):
                 if self._stop:
                     break
-                st.move_to(self._dev, pos)
-                actual = st.get_position(self._dev)
+                self._stage.move_to(pos)
+                actual = self._stage.get_position()
 
                 # Acquire spectrum
                 self._spec.start_exposure()
@@ -169,14 +169,15 @@ class ScanPlot(QWidget):
 class ScanWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Delay Scan — KDC101 + Spectrometer")
-        self._dev    = None
+        self.setWindowTitle("Delay Scan")
+        self._stage  = None
         self._spec   = None
         self._worker = None
         self._t0_mm  = None
 
         self._build_ui()
         self._connect_stage()
+
 
         self._poll_timer = QTimer(self)
         self._poll_timer.timeout.connect(self._poll_position)
@@ -349,13 +350,15 @@ class ScanWindow(QMainWindow):
     # ── Stage connection ──────────────────────────────────────────────────────
 
     def _connect_stage(self):
-        try:
-            self._dev = st._open_ftdi()
-            self._status.showMessage("Stage connected.")
-        except Exception as e:
+        stage = find_stage()
+        if stage is None:
             self._set_controls_enabled(False)
             QMessageBox.critical(self, "Stage Error",
-                                 f"Could not connect to KDC101:\n{e}")
+                                 "No stage found — is it plugged in and powered on?")
+            return
+        self._stage = stage
+        self._goto_spin.setRange(stage.min_position, stage.max_position)
+        self._status.showMessage(f"Stage connected: {stage.model_name}")
 
     # ── Spectrometer connection ───────────────────────────────────────────────
 
@@ -384,10 +387,10 @@ class ScanWindow(QMainWindow):
     # ── Position polling ──────────────────────────────────────────────────────
 
     def _poll_position(self):
-        if self._dev is None or self._worker is not None:
+        if self._stage is None or self._worker is not None:
             return
         try:
-            pos = st.get_position(self._dev)
+            pos = self._stage.get_position()
             self._pos_label.setText(f"{pos:.4f} mm")
             if self._t0_mm is not None:
                 delay = mm_to_fs(pos - self._t0_mm)
@@ -401,10 +404,10 @@ class ScanWindow(QMainWindow):
     # ── t0 ────────────────────────────────────────────────────────────────────
 
     def _do_set_t0(self):
-        if self._dev is None:
+        if self._stage is None:
             return
         try:
-            self._t0_mm = st.get_position(self._dev)
+            self._t0_mm = self._stage.get_position()
             self._t0_display.setText(f"{self._t0_mm:.4f} mm")
             self._status.showMessage(f"t0 set to {self._t0_mm:.4f} mm.")
         except Exception as e:
@@ -430,10 +433,9 @@ class ScanWindow(QMainWindow):
     # ── Scan ─────────────────────────────────────────────────────────────────
 
     def _do_scan(self):
-        if self._dev is None:
-            return
-        if self._t0_mm is None:
-            QMessageBox.warning(self, "No t0", "Set t0 before scanning.")
+        if self._stage is None or self._t0_mm is None:
+            QMessageBox.warning(self, "Not ready",
+                                "Connect a stage and set t0 before scanning.")
             return
         if self._spec is None:
             QMessageBox.warning(self, "No Spectrometer",
@@ -441,14 +443,14 @@ class ScanWindow(QMainWindow):
             return
 
         delays_fs    = self._scan_delays()
-        positions_mm = np.clip(self._t0_mm + fs_to_mm(delays_fs), 0.0, 25.0)
+        positions_mm = np.clip(self._t0_mm + fs_to_mm(delays_fs),
+                               self._stage.min_position,
+                               self._stage.max_position)
 
         if not np.allclose(self._t0_mm + fs_to_mm(delays_fs), positions_mm):
             QMessageBox.warning(self, "Range Warning",
-                "Some positions are outside 0–25 mm and will be clamped.")
+                "Some positions are outside the stage range and will be clamped.")
 
-        # Initialise plot with placeholder wavelengths; will be replaced at
-        # first step once we know the actual wavelength array.
         try:
             wl = np.asarray(self._spec.get_wavelengths())
         except Exception as e:
@@ -463,7 +465,7 @@ class ScanWindow(QMainWindow):
 
         self._set_controls_enabled(False, scanning=True)
 
-        self._worker = ScanWorker(self._dev, self._spec, positions_mm, delays_fs)
+        self._worker = ScanWorker(self._stage, self._spec, positions_mm, delays_fs)
         self._worker.step_done.connect(self._on_scan_step)
         self._worker.finished.connect(self._on_scan_done)
         self._worker.error.connect(self._on_error)
@@ -510,30 +512,34 @@ class ScanWindow(QMainWindow):
     # ── Single-command helpers ────────────────────────────────────────────────
 
     def _do_home(self):
-        self._run_command(st.home)
+        self._run_command(self._stage.home)
 
     def _do_jog_fwd(self):
         try:
-            cur = st.get_position(self._dev)
+            cur = self._stage.get_position()
         except Exception:
             return
-        self._run_command(st.move_to, min(cur + self._step_spin.value(), 25.0))
+        self._run_command(self._stage.move_to,
+                          min(cur + self._step_spin.value(),
+                              self._stage.max_position))
 
     def _do_jog_back(self):
         try:
-            cur = st.get_position(self._dev)
+            cur = self._stage.get_position()
         except Exception:
             return
-        self._run_command(st.move_to, max(cur - self._step_spin.value(), 0.0))
+        self._run_command(self._stage.move_to,
+                          max(cur - self._step_spin.value(),
+                              self._stage.min_position))
 
     def _do_goto(self):
-        self._run_command(st.move_to, self._goto_spin.value())
+        self._run_command(self._stage.move_to, self._goto_spin.value())
 
     def _run_command(self, command, *args):
-        if self._dev is None:
+        if self._stage is None:
             return
         self._set_controls_enabled(False)
-        self._worker = StageWorker(self._dev, command, *args)
+        self._worker = StageWorker(command, *args)
         self._worker.finished.connect(self._on_command_done)
         self._worker.error.connect(self._on_error)
         self._worker.start()
@@ -570,11 +576,12 @@ class ScanWindow(QMainWindow):
             if isinstance(self._worker, ScanWorker):
                 self._worker.stop()
             self._worker.wait()
-        if self._spec is not None:
-            try:
-                self._spec.close()
-            except Exception:
-                pass
+        for device in (self._spec, self._stage):
+            if device is not None:
+                try:
+                    device.close()
+                except Exception:
+                    pass
         event.accept()
 
 
