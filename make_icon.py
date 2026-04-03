@@ -104,7 +104,7 @@ for sz in sizes:
         icon.save(f"{iconset_dir}/icon_{sz//2}x{sz//2}@2x.png")
 
 # Convert to .icns
-icns_path = "/Applications/Laser Spectrometer.app/Contents/Resources/AppIcon.icns"
+icns_path = "/Applications/Laser Lab.app/Contents/Resources/AppIcon.icns"
 os.makedirs(os.path.dirname(icns_path), exist_ok=True)
 subprocess.run(["iconutil", "-c", "icns", iconset_dir, "-o", icns_path], check=True)
 print(f"Icon written to {icns_path}")
