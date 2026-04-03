@@ -62,21 +62,21 @@ class LauncherWindow(QWidget):
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
 
-        self._spec_ind, spec_card = self._make_card(
+        self._spec_ind, self._spec_btn, spec_card = self._make_card(
             "Spectrometer",
             "Live spectrum · averaging · time-domain view",
             "spectrometer_gui.py",
         )
         layout.addWidget(spec_card)
 
-        self._stage_ind, stage_card = self._make_card(
+        self._stage_ind, self._stage_btn, stage_card = self._make_card(
             "Stage Controller",
             "Position · home · jog · delay scan (stage only)",
             "stage_gui.py",
         )
         layout.addWidget(stage_card)
 
-        self._frog_ind, frog_card = self._make_card(
+        self._frog_ind, self._frog_btn, frog_card = self._make_card(
             "FROG Scan",
             "Delay scan · spectrum acquisition · Gaussian fit",
             "frog_gui.py",
@@ -113,10 +113,11 @@ class LauncherWindow(QWidget):
         btn = QPushButton("Open")
         btn.setFixedWidth(72)
         btn.setFixedHeight(48)
+        btn.setEnabled(False)
         btn.clicked.connect(lambda: self._launch(script))
         row.addWidget(btn)
 
-        return indicator, group
+        return indicator, btn, group
 
     # ── Hardware detection ─────────────────────────────────────────────────────
 
@@ -125,6 +126,8 @@ class LauncherWindow(QWidget):
         for ind in (self._spec_ind, self._stage_ind, self._frog_ind):
             ind.setStyleSheet("color: grey;")
             ind.setToolTip("Checking…")
+        for btn in (self._spec_btn, self._stage_btn, self._frog_btn):
+            btn.setEnabled(False)
         self._probe_thread = HardwareProbe()
         self._probe_thread.result.connect(self._on_probe_result)
         self._probe_thread.start()
@@ -141,6 +144,10 @@ class LauncherWindow(QWidget):
         self._set_indicator(self._frog_ind, has_spec and has_stage,
                             "Stage and spectrometer detected",
                             "Requires both stage and spectrometer")
+
+        self._spec_btn.setEnabled(has_spec)
+        self._stage_btn.setEnabled(has_stage)
+        self._frog_btn.setEnabled(has_spec and has_stage)
 
     @staticmethod
     def _set_indicator(label, ok, tip_ok, tip_bad):
