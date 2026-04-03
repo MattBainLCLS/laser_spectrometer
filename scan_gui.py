@@ -43,20 +43,35 @@ class ScanWorker(QThread):
     finished  = pyqtSignal()
     error     = pyqtSignal(str)
 
-    def __init__(self, stage, spec, positions_mm, delays_fs):
+    def __init__(self, stage, spec, positions_mm, delays_fs,
+                 n_averages=1, wl_min=0.0, wl_max=np.inf):
         super().__init__()
         self._stage        = stage
         self._spec         = spec
         self._positions_mm = positions_mm
         self._delays_fs    = delays_fs
+        self._n_averages   = n_averages
+        self._wl_min       = wl_min
+        self._wl_max       = wl_max
         self._stop         = False
 
     def stop(self):
         self._stop = True
 
+    def _acquire_one(self):
+        deadline = time.monotonic() + self._spec.exposure_time + 2.0
+        self._spec.start_exposure()
+        while not self._spec.is_data_ready():
+            if time.monotonic() > deadline:
+                raise TimeoutError("Spectrometer timed out")
+            time.sleep(0.005)
+        return self._spec.get_spectrum()
+
     def run(self):
         try:
             wavelengths = np.asarray(self._spec.get_wavelengths())
+            wl_mask = (wavelengths >= self._wl_min) & (wavelengths <= self._wl_max)
+            wavelengths = wavelengths[wl_mask]
             for i, (pos, delay) in enumerate(
                     zip(self._positions_mm, self._delays_fs)):
                 if self._stop:
@@ -64,16 +79,11 @@ class ScanWorker(QThread):
                 self._stage.move_to(pos)
                 actual = self._stage.get_position()
 
-                self._spec.start_exposure()
-                deadline = time.monotonic() + self._spec.exposure_time + 2.0
-                while not self._spec.is_data_ready():
-                    if time.monotonic() > deadline:
-                        raise TimeoutError("Spectrometer timed out")
-                    time.sleep(0.005)
-                result = self._spec.get_spectrum()
+                spectra = [self._acquire_one().spectrum[wl_mask]
+                           for _ in range(self._n_averages)]
+                spectrum = np.mean(spectra, axis=0)
 
-                self.step_done.emit(i, delay, actual,
-                                    wavelengths, result.spectrum)
+                self.step_done.emit(i, delay, actual, wavelengths, spectrum)
             self.finished.emit()
         except Exception as e:
             self.error.emit(str(e))
@@ -201,12 +211,33 @@ class ScanWindow(QMainWindow):
         self._scan_step.setFixedWidth(_w)
         scl.addWidget(self._scan_step, 2, 1)
 
+        scl.addWidget(QLabel("λ range (nm):"), 3, 0)
+        wl_row = QHBoxLayout()
+        wl_row.setSpacing(4)
+        self._wl_min = QDoubleSpinBox()
+        self._wl_min.setRange(100, 3000)
+        self._wl_min.setDecimals(1)
+        self._wl_min.setValue(300.0)
+        self._wl_min.setFixedWidth(80)
+        wl_row.addWidget(self._wl_min)
+        wl_row.addWidget(QLabel("–"))
+        self._wl_max = QDoubleSpinBox()
+        self._wl_max.setRange(100, 3000)
+        self._wl_max.setDecimals(1)
+        self._wl_max.setValue(1100.0)
+        self._wl_max.setFixedWidth(80)
+        wl_row.addWidget(self._wl_max)
+        wl_row.addStretch()
+        wl_container = QWidget()
+        wl_container.setLayout(wl_row)
+        scl.addWidget(wl_container, 3, 1)
+
         self._scan_preview = QLabel("")
-        scl.addWidget(self._scan_preview, 3, 0)
+        scl.addWidget(self._scan_preview, 4, 0)
         self._scan_range_indicator = QLabel("●")
         self._scan_range_indicator.setStyleSheet("color: grey;")
         self._scan_range_indicator.setToolTip("Set t0 to check range")
-        scl.addWidget(self._scan_range_indicator, 3, 1)
+        scl.addWidget(self._scan_range_indicator, 4, 1)
 
         for sp in (self._scan_start, self._scan_stop, self._scan_step):
             sp.valueChanged.connect(self._update_scan_preview)
@@ -222,19 +253,19 @@ class ScanWindow(QMainWindow):
         self._abort_btn.setEnabled(False)
         self._abort_btn.clicked.connect(self._do_abort)
         btn_row.addWidget(self._abort_btn)
-        scl.addLayout(btn_row, 4, 0, 1, 2)
+        scl.addLayout(btn_row, 5, 0, 1, 2)
 
         self._progress = QProgressBar()
-        scl.addWidget(self._progress, 5, 0, 1, 2)
+        scl.addWidget(self._progress, 6, 0, 1, 2)
         self._scan_step_label = QLabel("")
         self._scan_step_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        scl.addWidget(self._scan_step_label, 6, 0, 1, 2)
+        scl.addWidget(self._scan_step_label, 7, 0, 1, 2)
 
         self._save_btn = QPushButton("Save Scan Data…")
         self._save_btn.setFixedHeight(34)
         self._save_btn.setEnabled(False)
         self._save_btn.clicked.connect(self._do_save)
-        scl.addWidget(self._save_btn, 7, 0, 1, 2)
+        scl.addWidget(self._save_btn, 8, 0, 1, 2)
 
         ctrl.addWidget(scan_group)
         ctrl.addStretch()
@@ -323,7 +354,16 @@ class ScanWindow(QMainWindow):
             QMessageBox.critical(self, "Spectrometer Error", str(e))
             return
 
-        self._plot.init_scan(delays_fs, wl)
+        # Clamp spin box values to actual spectrometer range on first use
+        self._wl_min.setRange(float(wl[0]), float(wl[-1]))
+        self._wl_max.setRange(float(wl[0]), float(wl[-1]))
+        self._wl_min.setValue(max(self._wl_min.value(), float(wl[0])))
+        self._wl_max.setValue(min(self._wl_max.value(), float(wl[-1])))
+
+        wl_min = self._wl_min.value()
+        wl_max = self._wl_max.value()
+        wl_cropped = wl[(wl >= wl_min) & (wl <= wl_max)]
+        self._plot.init_scan(delays_fs, wl_cropped)
         self._progress.setMaximum(len(delays_fs))
         self._progress.setValue(0)
         self._scan_step_label.setText("")
@@ -334,7 +374,9 @@ class ScanWindow(QMainWindow):
         self._stage_ctrl.set_busy(True)
         self._status.showMessage("Scanning…")
 
-        self._worker = ScanWorker(stage, spec, positions_mm, delays_fs)
+        self._worker = ScanWorker(stage, spec, positions_mm, delays_fs,
+                                   n_averages=self._spec_widget.n_averages,
+                                   wl_min=wl_min, wl_max=wl_max)
         self._worker.step_done.connect(self._on_scan_step)
         self._worker.finished.connect(self._on_scan_done)
         self._worker.error.connect(self._on_scan_error)

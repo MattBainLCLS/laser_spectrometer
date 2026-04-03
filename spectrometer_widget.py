@@ -30,7 +30,7 @@ matplotlib.use("QtAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 
-from spectrometers import find_spectrometer
+from spectrometers import find_spectrometer, SpectrumResult
 
 
 # ── Time-domain computation ────────────────────────────────────────────────────
@@ -73,26 +73,43 @@ class AcquisitionWorker(QThread):
     td_ready       = pyqtSignal(object, object, float)
     error          = pyqtSignal(str)
 
-    def __init__(self, spec, continuous=False):
+    def __init__(self, spec, continuous=False, n_averages=1):
         super().__init__()
         self.spec       = spec
         self.continuous = continuous
+        self.n_averages = n_averages
         self._running   = True
         self.td_params  = None
 
     def stop(self):
         self._running = False
 
+    def _acquire_averaged(self):
+        results = []
+        for _ in range(self.n_averages):
+            self.spec.start_exposure()
+            while not self.spec.is_data_ready():
+                if not self._running:
+                    return None
+                time.sleep(0.01)
+            results.append(self.spec.get_spectrum())
+        if self.n_averages > 1:
+            return SpectrumResult(
+                spectrum=np.mean([r.spectrum for r in results], axis=0),
+                timestamp=results[-1].timestamp,
+                exposure_time=results[-1].exposure_time,
+                load_level=max(r.load_level for r in results),
+                averaging=self.n_averages,
+            )
+        return results[0]
+
     def run(self):
         _spec_last = _td_last = 0.0
         try:
             while self._running:
-                self.spec.start_exposure()
-                while not self.spec.is_data_ready():
-                    if not self._running:
-                        return
-                    time.sleep(0.01)
-                data = self.spec.get_spectrum()
+                data = self._acquire_averaged()
+                if data is None:
+                    return
                 now = time.monotonic()
                 if now - _spec_last >= 0.05:
                     self.spectrum_ready.emit(data)
@@ -180,6 +197,10 @@ class SpectrometerWidget(QWidget):
         self._connect_spectrometer()
 
     # ── Public API ─────────────────────────────────────────────────────────────
+
+    @property
+    def n_averages(self) -> int:
+        return self.avg_spin.value()
 
     def shutdown(self):
         for w in (self.worker, self.interval_worker):
@@ -285,6 +306,14 @@ class SpectrometerWidget(QWidget):
         self.exposure_spin.setValue(0.1)
         self.exposure_spin.setFixedWidth(90)
         ctrl.addWidget(self.exposure_spin)
+        ctrl.addSpacing(8)
+
+        ctrl.addWidget(QLabel("Averages:"))
+        self.avg_spin = QSpinBox()
+        self.avg_spin.setRange(1, 100)
+        self.avg_spin.setValue(1)
+        self.avg_spin.setFixedWidth(55)
+        ctrl.addWidget(self.avg_spin)
         ctrl.addSpacing(8)
 
         self.grab_btn = QPushButton("Grab Spectrum")
@@ -413,7 +442,8 @@ class SpectrometerWidget(QWidget):
 
     def _start_worker(self, continuous):
         self._apply_exposure()
-        self.worker = AcquisitionWorker(self.spec, continuous=continuous)
+        self.worker = AcquisitionWorker(self.spec, continuous=continuous,
+                                        n_averages=self.avg_spin.value())
         if self.td_panel.isVisible():
             self.worker.td_params = (self.wavelengths, self.td_smooth_spin.value())
         self.worker.spectrum_ready.connect(self._on_spectrum)
@@ -531,7 +561,7 @@ class SpectrometerWidget(QWidget):
 
     def _set_controls_enabled(self, enabled):
         for w in (self.grab_btn, self.freerun_btn, self.exposure_spin,
-                  self.interval_spin, self.duration_spin,
+                  self.avg_spin, self.interval_spin, self.duration_spin,
                   self.indefinite_check, self.format_combo,
                   self.outdir_edit, self.browse_btn):
             w.setEnabled(enabled)
