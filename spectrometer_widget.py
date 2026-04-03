@@ -357,6 +357,34 @@ class SpectrometerWidget(QWidget):
         ctrl.addStretch()
         layout.addLayout(ctrl)
 
+        # Y-axis scaling row
+        yscale = QHBoxLayout()
+        yscale.setSpacing(8)
+        self._autoscale_check = QCheckBox("Auto Y")
+        self._autoscale_check.setChecked(True)
+        self._autoscale_check.toggled.connect(self._on_autoscale_toggled)
+        yscale.addWidget(self._autoscale_check)
+        self._ymin_spin = QDoubleSpinBox()
+        self._ymin_spin.setRange(-1e6, 1e9)
+        self._ymin_spin.setDecimals(0)
+        self._ymin_spin.setValue(0)
+        self._ymin_spin.setFixedWidth(90)
+        self._ymin_spin.setPrefix("Y min: ")
+        self._ymin_spin.setVisible(False)
+        self._ymin_spin.valueChanged.connect(self._apply_ylim)
+        yscale.addWidget(self._ymin_spin)
+        self._ymax_spin = QDoubleSpinBox()
+        self._ymax_spin.setRange(-1e6, 1e9)
+        self._ymax_spin.setDecimals(0)
+        self._ymax_spin.setValue(65535)
+        self._ymax_spin.setFixedWidth(90)
+        self._ymax_spin.setPrefix("Y max: ")
+        self._ymax_spin.setVisible(False)
+        self._ymax_spin.valueChanged.connect(self._apply_ylim)
+        yscale.addWidget(self._ymax_spin)
+        yscale.addStretch()
+        layout.addLayout(yscale)
+
         # Interval acquisition
         group = QGroupBox("Interval Acquisition")
         group_layout = QHBoxLayout(group)
@@ -585,11 +613,31 @@ class SpectrometerWidget(QWidget):
         self.clear_ref_btn.setEnabled(False)
         self.status_message.emit("Reference cleared.")
 
+    def _on_autoscale_toggled(self, checked):
+        self._ymin_spin.setVisible(not checked)
+        self._ymax_spin.setVisible(not checked)
+        if not checked:
+            ymin, ymax = self.ax.get_ylim()
+            self._ymin_spin.setValue(round(ymin))
+            self._ymax_spin.setValue(round(ymax))
+        else:
+            if self.last_data is not None:
+                self.ax.relim()
+                self.ax.autoscale_view(scalex=False)
+                self.canvas.draw_idle()
+
+    def _apply_ylim(self):
+        self.ax.set_ylim(self._ymin_spin.value(), self._ymax_spin.value())
+        self.canvas.draw_idle()
+
     def _on_spectrum(self, data):
         self.last_data = data
         self.line.set_data(self.wavelengths, data.spectrum)
-        self.ax.relim()
-        self.ax.autoscale_view(scalex=False)
+        if self._autoscale_check.isChecked():
+            self.ax.relim()
+            self.ax.autoscale_view(scalex=False)
+        else:
+            self.ax.set_ylim(self._ymin_spin.value(), self._ymax_spin.value())
         self.canvas.draw_idle()
         load = data.load_level
         warn = "  ⚠ OVERLOAD — reduce exposure" if load > 1 else ""
