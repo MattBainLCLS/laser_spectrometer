@@ -39,12 +39,24 @@ brew install libusb libftdi
 brew install python@3.13
 ```
 
-### 4. Clone the repository
+### 4. Download the repository
+
+**Option A — curl (recommended, no GitHub account required):**
+
+```bash
+curl -L https://github.com/MattBainLCLS/laser_spectrometer/archive/refs/heads/main.zip -o laser_spectrometer.zip
+unzip laser_spectrometer.zip
+cd laser_spectrometer-main
+```
+
+**Option B — git clone:**
 
 ```bash
 git clone git@github.com:MattBainLCLS/laser_spectrometer.git
 cd laser_spectrometer
 ```
+
+> **Note:** if you used Option A, your folder will be named `laser_spectrometer-main`. Substitute that name wherever the instructions reference `laser_spectrometer`.
 
 ### 5. Create a virtual environment and install dependencies
 
