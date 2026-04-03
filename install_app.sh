@@ -1,11 +1,11 @@
 #!/bin/bash
-# Creates the "Laser Spectrometer" macOS .app bundle and registers it with Launchpad.
+# Creates the "Laser Lab" macOS .app bundle and registers it with Launchpad.
 # Run from anywhere — the script resolves the repo path automatically.
 
 set -e
 
 REPO_DIR="$(cd "$(dirname "$0")" && pwd)"
-APP="/Applications/Laser Spectrometer.app"
+APP="/Applications/Laser Lab.app"
 
 echo "Repo: $REPO_DIR"
 echo "Creating $APP ..."
@@ -18,7 +18,7 @@ cat > "$APP/Contents/MacOS/launcher" << EOF
 #!/bin/bash
 cd "$REPO_DIR"
 source .env_spectrometer/bin/activate
-python spectrometer_gui.py
+python launcher_gui.py
 EOF
 chmod +x "$APP/Contents/MacOS/launcher"
 
@@ -29,11 +29,11 @@ cat > "$APP/Contents/Info.plist" << 'EOF'
 <plist version="1.0">
 <dict>
     <key>CFBundleName</key>
-    <string>Laser Spectrometer</string>
+    <string>Laser Lab</string>
     <key>CFBundleDisplayName</key>
-    <string>Laser Spectrometer</string>
+    <string>Laser Lab</string>
     <key>CFBundleIdentifier</key>
-    <string>uk.ac.lcls.laser-spectrometer</string>
+    <string>uk.ac.lcls.laser-lab</string>
     <key>CFBundleVersion</key>
     <string>1.0</string>
     <key>CFBundleExecutable</key>
@@ -56,4 +56,4 @@ python "$REPO_DIR/make_icon.py"
 # Notify Launchpad
 touch "$APP"
 
-echo "Done. 'Laser Spectrometer' will appear in Launchpad shortly."
+echo "Done. 'Laser Lab' will appear in Launchpad shortly."

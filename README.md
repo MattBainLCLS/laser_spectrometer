@@ -6,7 +6,7 @@ Python acquisition software for the RGB Photonics Qseries USB-C spectrometer (Qm
 
 - **Spectrometer GUI** — live spectrum display, free-run and single-shot acquisition, spectrum averaging, time-domain pulse view, reference pinning, interval acquisition with auto-save
 - **Stage GUI** — position display, home, jog, go-to, t0 reference, and a stage-only delay scan
-- **Scan GUI** — combined delay scan with per-step spectrum acquisition, live 2D waterfall plot, adjustable averaging and spectral window, post-scan Gaussian fit for pulse duration
+- **FROG Scan GUI** — combined delay scan with per-step spectrum acquisition, live 2D waterfall plot, adjustable averaging and spectral window, post-scan Gaussian fit for pulse duration
 - **Save CSV / PNG** — manual or automatic save at any time
 
 ---
@@ -66,13 +66,15 @@ ln -sf /opt/homebrew/lib/libftdi1.dylib /opt/homebrew/lib/libftdi.dylib
 
 ### 7. Create the macOS Launchpad app (optional)
 
-To launch the GUI directly from macOS Launchpad or Spotlight:
+To create a **Laser Lab** launcher app in `/Applications/` (accessible from Launchpad and Spotlight):
 
 ```bash
 bash install_app.sh
 ```
 
-This creates an `.app` bundle in `/Applications/`, generates the icon, and notifies Launchpad. The virtual environment (step 5) must be set up first.
+This creates `Laser Lab.app`, generates the icon, and notifies Launchpad. The virtual environment (step 5) must be set up first.
+
+The launcher detects connected hardware and shows a status indicator (green/red) for each tool. Click **Open** on any card to launch that GUI independently.
 
 ---
 
@@ -103,11 +105,11 @@ python3 -c "import usb.core; d = usb.core.find(idVendor=0x0403, idProduct=0xfaf0
 
 ## Usage
 
-### Scan GUI (stage + spectrometer together)
+### FROG Scan GUI (stage + spectrometer together)
 
 ```bash
 source .env_spectrometer/bin/activate
-python scan_gui.py
+python frog_gui.py
 ```
 
 This is the main acquisition interface. The window has three panels:
