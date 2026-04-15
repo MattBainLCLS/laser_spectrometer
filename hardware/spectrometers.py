@@ -27,9 +27,10 @@ _VENDOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "vendor
 class SpectrumResult:
     spectrum:      np.ndarray
     timestamp:     datetime
-    exposure_time: float        # seconds
-    load_level:    float        # 0–1 normal, >1 overloaded
+    exposure_time: float              # seconds
+    load_level:    float              # 0–1 normal, >1 overloaded
     averaging:     int = 1
+    std:           np.ndarray | None = None   # sample std across averages
 
 
 # ---------------------------------------------------------------------------

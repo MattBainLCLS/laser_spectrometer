@@ -95,6 +95,7 @@ class AcquisitionWorker(QThread):
                 if not buffer.flush_and_fill(stop_fn):
                     return
                 data = buffer.mean()
+                data.std = buffer.std() if self.n_averages > 1 else None
                 self.spectrum_ready.emit(data)
                 if self.td_params is not None:
                     wavelengths, sigma = self.td_params
@@ -107,6 +108,8 @@ class AcquisitionWorker(QThread):
                     if not buffer.acquire_one(stop_fn):
                         return
                     data = buffer.mean()
+                    if len(buffer) > 1:
+                        data.std = buffer.std()
                     now  = time.monotonic()
                     if now - _spec_last >= 0.05:
                         self.spectrum_ready.emit(data)
@@ -187,6 +190,7 @@ class SpectrometerWidget(QWidget):
         self.interval_worker = None
         self.last_data       = None
         self.ref_spectrum    = None
+        self._std_fill       = None
 
         self._build_ui()
         self._connect_spectrometer()
@@ -374,7 +378,7 @@ class SpectrometerWidget(QWidget):
         self._ymin_spin.setFixedWidth(90)
         self._ymin_spin.setPrefix("Y min: ")
         self._ymin_spin.setVisible(False)
-        self._ymin_spin.valueChanged.connect(self._apply_ylim)
+        self._ymin_spin.editingFinished.connect(self._apply_ylim)
         yscale.addWidget(self._ymin_spin)
         self._ymax_spin = QDoubleSpinBox()
         self._ymax_spin.setRange(-1e6, 1e9)
@@ -383,7 +387,7 @@ class SpectrometerWidget(QWidget):
         self._ymax_spin.setFixedWidth(90)
         self._ymax_spin.setPrefix("Y max: ")
         self._ymax_spin.setVisible(False)
-        self._ymax_spin.valueChanged.connect(self._apply_ylim)
+        self._ymax_spin.editingFinished.connect(self._apply_ylim)
         yscale.addWidget(self._ymax_spin)
         yscale.addStretch()
         layout.addLayout(yscale)
@@ -624,6 +628,7 @@ class SpectrometerWidget(QWidget):
             self._ymin_spin.setValue(round(ymin))
             self._ymax_spin.setValue(round(ymax))
         else:
+            self.ax.autoscale(enable=True, axis='y')
             if self.last_data is not None:
                 self.ax.relim()
                 self.ax.autoscale_view(scalex=False)
@@ -636,6 +641,22 @@ class SpectrometerWidget(QWidget):
     def _on_spectrum(self, data):
         self.last_data = data
         self.line.set_data(self.wavelengths, data.spectrum)
+
+        # Update ±1σ shaded fill
+        if self._std_fill is not None:
+            self._std_fill.remove()
+            self._std_fill = None
+        if data.std is not None and data.averaging > 1:
+            self._std_fill = self.ax.fill_between(
+                self.wavelengths,
+                data.spectrum - data.std,
+                data.spectrum + data.std,
+                alpha=0.25,
+                color=self.line.get_color(),
+                linewidth=0,
+                zorder=1,
+            )
+
         if self._autoscale_check.isChecked():
             self.ax.relim()
             self.ax.autoscale_view(scalex=False)
