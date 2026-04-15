@@ -14,6 +14,7 @@ shutdown()        — stop workers and close the device
 
 import os
 import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import time
 
 import numpy as np
@@ -30,7 +31,7 @@ matplotlib.use("QtAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg, NavigationToolbar2QT
 
-from spectrometers import find_spectrometer, SpectrumResult
+from hardware.spectrometers import find_spectrometer, SpectrumResult, RollingBuffer
 
 
 # ── Time-domain computation ────────────────────────────────────────────────────
@@ -84,45 +85,39 @@ class AcquisitionWorker(QThread):
     def stop(self):
         self._running = False
 
-    def _acquire_averaged(self):
-        results = []
-        for _ in range(self.n_averages):
-            self.spec.start_exposure()
-            while not self.spec.is_data_ready():
-                if not self._running:
-                    return None
-                time.sleep(0.01)
-            results.append(self.spec.get_spectrum())
-        if self.n_averages > 1:
-            return SpectrumResult(
-                spectrum=np.mean([r.spectrum for r in results], axis=0),
-                timestamp=results[-1].timestamp,
-                exposure_time=results[-1].exposure_time,
-                load_level=max(r.load_level for r in results),
-                averaging=self.n_averages,
-            )
-        return results[0]
-
     def run(self):
         _spec_last = _td_last = 0.0
+        buffer  = RollingBuffer(self.spec, self.n_averages)
+        stop_fn = lambda: not self._running
         try:
-            while self._running:
-                data = self._acquire_averaged()
-                if data is None:
+            if not self.continuous:
+                # Grab: fill buffer with n fresh frames, emit once.
+                if not buffer.flush_and_fill(stop_fn):
                     return
-                now = time.monotonic()
-                if now - _spec_last >= 0.05:
-                    self.spectrum_ready.emit(data)
-                    _spec_last = now
-                td_params = self.td_params
-                if td_params is not None and now - _td_last >= 0.05:
-                    wavelengths, sigma = td_params
+                data = buffer.mean()
+                self.spectrum_ready.emit(data)
+                if self.td_params is not None:
+                    wavelengths, sigma = self.td_params
                     t_fs, I_t, dt_fs = compute_time_domain(
                         wavelengths, data.spectrum, smooth_sigma=sigma)
                     self.td_ready.emit(t_fs, I_t, dt_fs)
-                    _td_last = now
-                if not self.continuous:
-                    break
+            else:
+                # Free-run: rolling buffer, emit after every frame.
+                while self._running:
+                    if not buffer.acquire_one(stop_fn):
+                        return
+                    data = buffer.mean()
+                    now  = time.monotonic()
+                    if now - _spec_last >= 0.05:
+                        self.spectrum_ready.emit(data)
+                        _spec_last = now
+                    td_params = self.td_params
+                    if td_params is not None and now - _td_last >= 0.05:
+                        wavelengths, sigma = td_params
+                        t_fs, I_t, dt_fs = compute_time_domain(
+                            wavelengths, data.spectrum, smooth_sigma=sigma)
+                        self.td_ready.emit(t_fs, I_t, dt_fs)
+                        _td_last = now
         except Exception as e:
             self.error.emit(str(e))
 
@@ -201,6 +196,14 @@ class SpectrometerWidget(QWidget):
     @property
     def n_averages(self) -> int:
         return self.avg_spin.value()
+
+    def stop_acquisition(self):
+        """Stop any running acquisition worker without closing the device."""
+        if self.worker is not None:
+            self.worker.stop()
+            self.worker.wait()
+            self.worker = None
+        self._reset_buttons()
 
     def shutdown(self):
         for w in (self.worker, self.interval_worker):

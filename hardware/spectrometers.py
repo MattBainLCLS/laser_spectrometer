@@ -6,12 +6,17 @@ Add new manufacturers by subclassing SpectrometerBase and registering a
 discovery call in find_spectrometer().
 """
 
+import os
 import sys
+import time
 from abc import ABC, abstractmethod
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
 
 import numpy as np
+
+_VENDOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "vendor")
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +92,7 @@ class SpectrometerBase(ABC):
 class QseriesAdapter(SpectrometerBase):
 
     def __init__(self, device):
-        sys.path.append("NioLink/Python/pyrgbdriverkit-0.3.7")
+        sys.path.append(os.path.join(_VENDOR, "NioLink", "Python", "pyrgbdriverkit-0.3.7"))
         from rgbdriverkit.qseriesdriver import Qseries
         from rgbdriverkit.calibratedspectrometer import SpectrometerProcessing
         self._spec = Qseries(device)
@@ -144,7 +149,7 @@ class QseriesAdapter(SpectrometerBase):
 class AvantesAdapter(SpectrometerBase):
 
     def __init__(self, identity):
-        sys.path.append("Avantes")
+        sys.path.append(os.path.join(_VENDOR, "Avantes"))
         from avaspec import (
             AVS_Activate, AVS_Deactivate, AVS_Done, AVS_GetVersionInfo,
             AVS_GetNumPixels, AVS_GetLambda,
@@ -248,7 +253,7 @@ def find_spectrometer() -> SpectrometerBase | None:
 
     # RGB Photonics Qseries
     try:
-        sys.path.append("NioLink/Python/pyrgbdriverkit-0.3.7")
+        sys.path.append(os.path.join(_VENDOR, "NioLink", "Python", "pyrgbdriverkit-0.3.7"))
         from rgbdriverkit.qseriesdriver import Qseries
         devices = Qseries.search_devices()
         if devices:
@@ -258,7 +263,7 @@ def find_spectrometer() -> SpectrometerBase | None:
 
     # Avantes — AVS_Init is called here; the adapter takes ownership
     try:
-        sys.path.append("Avantes")
+        sys.path.append(os.path.join(_VENDOR, "Avantes"))
         from avaspec import AVS_Init, AVS_GetList, AVS_Done
         n = AVS_Init(0)
         if n > 0:
@@ -269,3 +274,95 @@ def find_spectrometer() -> SpectrometerBase | None:
         pass
 
     return None
+
+
+# ---------------------------------------------------------------------------
+# Rolling acquisition buffer
+# ---------------------------------------------------------------------------
+
+class RollingBuffer:
+    """
+    Rolling FIFO acquisition buffer for a SpectrometerBase device.
+
+    Wraps the single-frame acquire loop and maintains a deque of the last
+    *n* SpectrumResult frames.  Used by both the live display (one frame at
+    a time → fast rolling mean) and the FROG scan worker (flush + fill N
+    fresh frames after each stage move).
+
+    Parameters
+    ----------
+    spec : SpectrometerBase
+        An open spectrometer instance.
+    n : int
+        Buffer depth — number of frames to average.
+    """
+
+    def __init__(self, spec: SpectrometerBase, n: int):
+        self._spec   = spec
+        self._n      = n
+        self._buffer: deque = deque(maxlen=n)
+
+    # ── Acquisition ───────────────────────────────────────────────────────────
+
+    def acquire_one(self, stop_fn=None) -> bool:
+        """
+        Acquire one frame and append it to the buffer.
+
+        Parameters
+        ----------
+        stop_fn : callable() → bool, optional
+            Polled between is_data_ready() checks.  Return True to abort.
+
+        Returns
+        -------
+        bool : True on success, False if *stop_fn* aborted the acquisition.
+        """
+        self._spec.start_exposure()
+        while not self._spec.is_data_ready():
+            if stop_fn is not None and stop_fn():
+                return False
+            time.sleep(0.01)
+        self._buffer.append(self._spec.get_spectrum())
+        return True
+
+    def flush_and_fill(self, stop_fn=None) -> bool:
+        """
+        Discard all buffered frames then collect *n* fresh ones.
+
+        Guarantees the result contains only frames acquired after this call
+        returns — use after a stage move to avoid stale data in the mean.
+        Returns False if *stop_fn* aborted before the buffer was full.
+        """
+        self._buffer.clear()
+        for _ in range(self._n):
+            if not self.acquire_one(stop_fn):
+                return False
+        return True
+
+    # ── Results ───────────────────────────────────────────────────────────────
+
+    def mean(self) -> SpectrumResult:
+        """Mean SpectrumResult over the current buffer contents."""
+        frames = list(self._buffer)
+        arr    = np.array([f.spectrum for f in frames])
+        last   = frames[-1]
+        return SpectrumResult(
+            spectrum      = np.mean(arr, axis=0),
+            timestamp     = last.timestamp,
+            exposure_time = last.exposure_time,
+            load_level    = max(f.load_level for f in frames),
+            averaging     = len(frames),
+        )
+
+    def std(self) -> np.ndarray:
+        """
+        Sample std (ddof=1) of spectra in the buffer.
+        Returns zeros when the buffer holds fewer than 2 frames.
+        """
+        frames = list(self._buffer)
+        if len(frames) < 2:
+            return np.zeros_like(frames[0].spectrum) if frames else np.array([])
+        return np.std([f.spectrum for f in frames], axis=0, ddof=1)
+
+    def __len__(self) -> int:
+        return len(self._buffer)

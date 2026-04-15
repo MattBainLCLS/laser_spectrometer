@@ -9,9 +9,13 @@ Usage:
 """
 
 import argparse
+import os
+import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import time
 
-from stages import find_stage, KDC101Stage
+from hardware.stages import find_stage, KDC101Stage
 
 
 def demo(stage: KDC101Stage):

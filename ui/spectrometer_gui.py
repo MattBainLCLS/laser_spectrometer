@@ -1,10 +1,12 @@
 """Standalone spectrometer window."""
 
+import os
 import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PyQt6.QtWidgets import QApplication, QMainWindow, QStatusBar
 
-from spectrometer_widget import SpectrometerWidget
+from ui.spectrometer_widget import SpectrometerWidget
 
 
 class SpectrometerWindow(QMainWindow):

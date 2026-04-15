@@ -1,8 +1,8 @@
+import os
 import sys
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vendor", "NioLink", "Python", "pyrgbdriverkit-0.3.7"))
 import time
 import matplotlib.pyplot as plt
-
-sys.path.append("NioLink/Python/pyrgbdriverkit-0.3.7")
 
 from rgbdriverkit.qseriesdriver import Qseries
 from rgbdriverkit.calibratedspectrometer import SpectrometerProcessing

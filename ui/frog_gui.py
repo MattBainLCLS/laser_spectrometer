@@ -11,7 +11,9 @@ Each scan step:
   3. Update the 2D colormap live
 """
 
+import os
 import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import time
 
 import numpy as np
@@ -30,16 +32,17 @@ matplotlib.use("QtAgg")
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_qtagg import FigureCanvasQTAgg
 
-from stage_widget import StageControlWidget, fs_to_mm, mm_to_fs
-from spectrometer_widget import SpectrometerWidget
-from scan_analysis_window import ScanAnalysisWindow
+from hardware.spectrometers import RollingBuffer
+from ui.stage_widget import StageControlWidget, fs_to_mm, mm_to_fs
+from ui.spectrometer_widget import SpectrometerWidget
+from ui.scan_analysis_window import ScanAnalysisWindow
 
 
 # ── Worker: delay scan with spectrum acquisition ──────────────────────────────
 
 class ScanWorker(QThread):
-    # index, delay_fs, position_mm, wavelengths (1-D), spectrum (1-D)
-    step_done = pyqtSignal(int, float, float, object, object)
+    # index, delay_fs, position_mm, wavelengths (1-D), spectrum (1-D), std (1-D)
+    step_done = pyqtSignal(int, float, float, object, object, object)
     finished  = pyqtSignal()
     error     = pyqtSignal(str)
 
@@ -58,19 +61,12 @@ class ScanWorker(QThread):
     def stop(self):
         self._stop = True
 
-    def _acquire_one(self):
-        deadline = time.monotonic() + self._spec.exposure_time + 2.0
-        self._spec.start_exposure()
-        while not self._spec.is_data_ready():
-            if time.monotonic() > deadline:
-                raise TimeoutError("Spectrometer timed out")
-            time.sleep(0.005)
-        return self._spec.get_spectrum()
-
     def run(self):
+        buffer  = RollingBuffer(self._spec, self._n_averages)
+        stop_fn = lambda: self._stop
         try:
             wavelengths = np.asarray(self._spec.get_wavelengths())
-            wl_mask = (wavelengths >= self._wl_min) & (wavelengths <= self._wl_max)
+            wl_mask     = (wavelengths >= self._wl_min) & (wavelengths <= self._wl_max)
             wavelengths = wavelengths[wl_mask]
             for i, (pos, delay) in enumerate(
                     zip(self._positions_mm, self._delays_fs)):
@@ -79,11 +75,12 @@ class ScanWorker(QThread):
                 self._stage.move_to(pos)
                 actual = self._stage.get_position()
 
-                spectra = [self._acquire_one().spectrum[wl_mask]
-                           for _ in range(self._n_averages)]
-                spectrum = np.mean(spectra, axis=0)
+                if not buffer.flush_and_fill(stop_fn):
+                    break
 
-                self.step_done.emit(i, delay, actual, wavelengths, spectrum)
+                spectrum = buffer.mean().spectrum[wl_mask]
+                std      = buffer.std()[wl_mask]
+                self.step_done.emit(i, delay, actual, wavelengths, spectrum, std)
             self.finished.emit()
         except Exception as e:
             self.error.emit(str(e))
@@ -110,7 +107,8 @@ class ScanPlot(QWidget):
     def init_scan(self, delays_fs: np.ndarray, wavelengths: np.ndarray):
         self._delays      = delays_fs
         self._wavelengths = wavelengths
-        self._data = np.full((len(delays_fs), len(wavelengths)), np.nan)
+        self._data     = np.full((len(delays_fs), len(wavelengths)), np.nan)
+        self._std_data = np.full((len(delays_fs), len(wavelengths)), np.nan)
 
         if self._colorbar is not None:
             self._colorbar.remove()
@@ -133,10 +131,11 @@ class ScanPlot(QWidget):
         self._ax.set_title("Scan")
         self._canvas.draw()
 
-    def update_step(self, index: int, spectrum: np.ndarray):
+    def update_step(self, index: int, spectrum: np.ndarray, std: np.ndarray):
         if self._data is None:
             return
-        self._data[index] = spectrum
+        self._data[index]     = spectrum
+        self._std_data[index] = std
         valid = self._data[~np.all(np.isnan(self._data), axis=1)]
         if valid.size:
             self._mesh.set_array(self._data.ravel())
@@ -144,7 +143,7 @@ class ScanPlot(QWidget):
         self._canvas.draw_idle()
 
     def get_data(self):
-        return self._delays, self._wavelengths, self._data
+        return self._delays, self._wavelengths, self._data, self._std_data
 
 
 # ── Main window ────────────────────────────────────────────────────────────────
@@ -374,6 +373,10 @@ class ScanWindow(QMainWindow):
         self._stage_ctrl.set_busy(True)
         self._status.showMessage("Scanning…")
 
+        # Stop any running free-run / grab worker so the scan has exclusive
+        # access to the spectrometer device.
+        self._spec_widget.stop_acquisition()
+
         self._worker = ScanWorker(stage, spec, positions_mm, delays_fs,
                                    n_averages=self._spec_widget.n_averages,
                                    wl_min=wl_min, wl_max=wl_max)
@@ -387,13 +390,13 @@ class ScanWindow(QMainWindow):
             self._worker.stop()
             self._scan_step_label.setText("Aborting…")
 
-    def _on_scan_step(self, index, delay_fs, position_mm, wavelengths, spectrum):
+    def _on_scan_step(self, index, delay_fs, position_mm, wavelengths, spectrum, std):
         self._progress.setValue(index + 1)
         self._scan_step_label.setText(
             f"Step {index + 1}/{self._progress.maximum()}  "
             f"{delay_fs:+.1f} fs  →  {position_mm:.4f} mm")
         self._stage_ctrl.update_position_display(position_mm)
-        self._plot.update_step(index, spectrum)
+        self._plot.update_step(index, spectrum, std)
 
     def _on_scan_done(self):
         self._worker.wait()
@@ -405,7 +408,7 @@ class ScanWindow(QMainWindow):
         self._status.showMessage("Scan complete.")
         self._scan_step_label.setText("Done.")
 
-        delays, wavelengths, spectra = self._plot.get_data()
+        delays, wavelengths, spectra, _ = self._plot.get_data()
         if spectra is not None and not np.all(np.isnan(spectra)):
             self._analysis_window = ScanAnalysisWindow(delays, wavelengths, spectra)
             self._analysis_window.show()
@@ -422,7 +425,7 @@ class ScanWindow(QMainWindow):
     # ── Save ──────────────────────────────────────────────────────────────────
 
     def _do_save(self):
-        delays, wavelengths, spectra = self._plot.get_data()
+        delays, wavelengths, spectra, spectra_std = self._plot.get_data()
         if spectra is None:
             return
         path, _ = QFileDialog.getSaveFileName(
@@ -434,6 +437,7 @@ class ScanWindow(QMainWindow):
                  delays_fs=delays,
                  wavelengths_nm=wavelengths,
                  spectra=spectra,
+                 spectra_std=spectra_std,
                  t0_mm=np.array([self._stage_ctrl.t0_mm or 0.0]))
         self._status.showMessage(f"Saved to {path}")
 

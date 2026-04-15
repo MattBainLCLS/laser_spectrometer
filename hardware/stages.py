@@ -268,7 +268,7 @@ class XeryonStage(StageBase):
         Travel limit in mm (used when the settings file does not define HLIM).
     """
 
-    _XERYON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "xeryon")
+    _XERYON_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "vendor", "xeryon")
 
     def __init__(self, stage_type: str = "XLS_78_3N",
                  axis_letter: str = "X",

@@ -5,7 +5,9 @@ Left panel: StageControlWidget (position, home, jog, go-to, t0).
 Below:       Delay scan (stage only, no spectrometer).
 """
 
+import os
 import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 
@@ -19,7 +21,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 
-from stage_widget import StageControlWidget, StageWorker, fs_to_mm, mm_to_fs
+from ui.stage_widget import StageControlWidget, StageWorker, fs_to_mm, mm_to_fs
 
 
 # ── Worker: stage-only delay scan ─────────────────────────────────────────────
