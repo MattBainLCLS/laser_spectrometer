@@ -1,9 +1,9 @@
+import os
 import sys
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "vendor", "Avantes"))
 import time
 import numpy as np
 import matplotlib.pyplot as plt
-
-sys.path.append("Avantes")
 from avaspec import (
     AVS_Init, AVS_GetList, AVS_Activate, AVS_Deactivate, AVS_Done,
     AVS_GetNumPixels, AVS_GetLambda, AVS_GetParameter,

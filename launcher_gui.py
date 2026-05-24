@@ -65,21 +65,21 @@ class LauncherWindow(QWidget):
         self._spec_ind, self._spec_btn, spec_card = self._make_card(
             "Spectrometer",
             "Live spectrum · averaging · time-domain view",
-            "spectrometer_gui.py",
+            "ui/spectrometer_gui.py",
         )
         layout.addWidget(spec_card)
 
         self._stage_ind, self._stage_btn, stage_card = self._make_card(
             "Stage Controller",
             "Position · home · jog · delay scan (stage only)",
-            "stage_gui.py",
+            "ui/stage_gui.py",
         )
         layout.addWidget(stage_card)
 
         self._frog_ind, self._frog_btn, frog_card = self._make_card(
             "FROG Scan",
             "Delay scan · spectrum acquisition · Gaussian fit",
-            "frog_gui.py",
+            "ui/frog_gui.py",
         )
         layout.addWidget(frog_card)
 

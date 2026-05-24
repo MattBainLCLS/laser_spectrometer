@@ -17,7 +17,9 @@ update_position_display(float) — update position/delay labels from outside
 shutdown()      — stop polling, wait for workers, close stage
 """
 
+import os
 import sys
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PyQt6.QtWidgets import (
     QApplication, QWidget,
@@ -28,7 +30,7 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer, QThread, pyqtSignal
 from PyQt6.QtGui import QFont
 
-from stages import find_stage, StageBase
+from hardware.stages import find_stage, StageBase
 
 C_MM_PER_FS = 2.99792458e-4   # mm per femtosecond
 
