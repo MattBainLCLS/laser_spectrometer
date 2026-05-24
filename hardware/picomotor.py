@@ -246,6 +246,29 @@ class Picomotor8742:
         non-volatile memory (SM)."""
         self._send("SM")
 
+    # ── RS-485 address management ─────────────────────────────────────────────
+
+    def rs485_address(self) -> int:
+        """Return the controller's current RS-485 network address (SA?)."""
+        return int(self._query("SA?"))
+
+    def set_rs485_address(self, address: int, save: bool = True):
+        """
+        Set the RS-485 network address (SA) and optionally persist it (SM).
+
+        Parameters
+        ----------
+        address : int
+            New RS-485 address, 1–31.  Default from factory is 1.
+        save : bool
+            If True (default), also send SM so the address survives power cycles.
+        """
+        if not 1 <= address <= 31:
+            raise ValueError(f"RS-485 address must be 1–31, got {address}")
+        self._send(f"SA{address}")
+        if save:
+            self._send("SM")
+
     # ── Axis queries ──────────────────────────────────────────────────────────
 
     def motor_type(self, axis: int) -> int:
@@ -367,6 +390,73 @@ class Picomotor8742:
             time.sleep(0.05)
         raise TimeoutError(
             f"Axis {axis} did not finish moving within {timeout:.0f} s")
+
+
+# ── Picomotor8742Slave — RS-485 proxy ────────────────────────────────────────
+
+class Picomotor8742Slave(Picomotor8742):
+    """
+    Proxy for a slave 8742 controller reached via the master's RS-485 bus.
+
+    The master's USB connection is used for all I/O.  Every command sent to
+    the slave is prefixed with '<addr>>' and every response has that prefix
+    stripped before parsing.  All motion methods (move_relative, motor_type,
+    get_position, etc.) work identically to a direct-USB Picomotor8742.
+
+    Prerequisite: the slave's RS-485 address must already be set to a unique
+    non-default value (SA + SM) while connected directly via USB.  Factory
+    default is address 1 (same as the master) — that conflict prevents any
+    slave communication.
+
+    Parameters
+    ----------
+    master : Picomotor8742
+        An already-connected master controller.
+    rs485_address : int
+        The slave's RS-485 address (2–31).
+    serial : str, optional
+        Expected serial number.  If given, connect() verifies it against
+        the *IDN? response from the slave.
+    """
+
+    def __init__(self, master: 'Picomotor8742', rs485_address: int,
+                 serial: str | None = None):
+        self._target_serial = serial
+        self._dev    = None
+        self._ep_out = None
+        self._ep_in  = None
+        self._serial = serial
+
+        self._master     = master
+        self._rs485_addr = rs485_address
+
+    # ── Lifecycle ─────────────────────────────────────────────────────────────
+
+    def connect(self, run_motor_check: bool = True):
+        """Verify the slave responds and optionally run MC.  Master must already be connected."""
+        serial = self._read_serial()
+        if self._target_serial and serial != self._target_serial:
+            raise RuntimeError(
+                f"RS-485 slave at address {self._rs485_addr}: "
+                f"expected serial {self._target_serial!r}, got {serial!r}")
+        self._serial = serial
+        if run_motor_check:
+            self.motor_check()
+
+    def close(self):
+        pass  # Master owns the USB connection
+
+    # ── Route all I/O through the master with 'N>' prefix ────────────────────
+
+    def _send(self, cmd: str):
+        self._master._ep_out.write(
+            (f"{self._rs485_addr}>{cmd.strip()}\r").encode("ascii"))
+
+    def _recv(self) -> str:
+        raw = bytes(self._master._ep_in.read(100))
+        resp = raw.rstrip(b"\r\n\x00 ").decode("ascii", errors="replace")
+        prefix = f"{self._rs485_addr}>"
+        return resp[len(prefix):] if resp.startswith(prefix) else resp
 
 
 # ── PicomotorStage — StageBase wrapper ───────────────────────────────────────
