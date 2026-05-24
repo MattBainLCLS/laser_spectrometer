@@ -25,12 +25,13 @@ _VENDOR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "vendor
 
 @dataclass
 class SpectrumResult:
-    spectrum:      np.ndarray
-    timestamp:     datetime
-    exposure_time: float              # seconds
-    load_level:    float              # 0–1 normal, >1 overloaded
-    averaging:     int = 1
-    std:           np.ndarray | None = None   # sample std across averages
+    spectrum:       np.ndarray
+    timestamp:      datetime
+    exposure_time:  float              # seconds
+    load_level:     float              # 0–1 normal, >1 overloaded
+    averaging:      int = 1
+    std:            np.ndarray | None = None   # sample std across averages
+    intensity_unit: int = 1            # 1=ADC counts, 3=nW/nm, 4=nW/m²/nm
 
 
 # ---------------------------------------------------------------------------
@@ -85,6 +86,22 @@ class SpectrometerBase(ABC):
     @abstractmethod
     def get_spectrum(self) -> SpectrumResult: ...
 
+    # --- Optional capability: sensitivity calibration ---
+
+    @property
+    def supports_sensitivity_calibration(self) -> bool:
+        """True if the device supports toggling on-board sensitivity calibration."""
+        return False
+
+    @property
+    def sensitivity_calibration(self) -> bool:
+        """Whether sensitivity calibration is currently applied to returned spectra."""
+        return False
+
+    @sensitivity_calibration.setter
+    def sensitivity_calibration(self, value: bool):
+        pass
+
 
 # ---------------------------------------------------------------------------
 # RGB Photonics Qseries adapter
@@ -116,6 +133,27 @@ class QseriesAdapter(SpectrometerBase):
     def exposure_time(self, value):
         self._spec.exposure_time = value
 
+    # --- Sensitivity calibration ---
+
+    @property
+    def supports_sensitivity_calibration(self) -> bool:
+        avail = self._spec._available_processing_steps
+        if avail is None:
+            return False
+        return bool(avail & self._Processing.SensitivityCalibration)
+
+    @property
+    def sensitivity_calibration(self) -> bool:
+        return bool(self._spec.processing_steps & self._Processing.SensitivityCalibration)
+
+    @sensitivity_calibration.setter
+    def sensitivity_calibration(self, value: bool):
+        steps = self._spec.processing_steps
+        if value:
+            self._spec.processing_steps = steps | self._Processing.SensitivityCalibration
+        else:
+            self._spec.processing_steps = steps & ~self._Processing.SensitivityCalibration
+
     def open(self):
         self._spec.open()
         self._spec.processing_steps = self._Processing.AdjustOffset
@@ -140,6 +178,7 @@ class QseriesAdapter(SpectrometerBase):
             exposure_time=d.ExposureTime,
             load_level=d.LoadLevel,
             averaging=d.Averaging,
+            intensity_unit=d.IntensityUnit,
         )
 
 

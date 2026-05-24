@@ -371,6 +371,19 @@ class SpectrometerWidget(QWidget):
         self._autoscale_check.setChecked(True)
         self._autoscale_check.toggled.connect(self._on_autoscale_toggled)
         yscale.addWidget(self._autoscale_check)
+        self._log_y_check = QCheckBox("Log Y (base 10)")
+        self._log_y_check.setChecked(False)
+        self._log_y_check.toggled.connect(self._on_log_y_toggled)
+        yscale.addWidget(self._log_y_check)
+        self._sensitivity_check = QCheckBox("Sensitivity Cal.")
+        self._sensitivity_check.setToolTip(
+            "Apply the device's factory sensitivity calibration.\n"
+            "Y axis will switch to absolute units (nW/nm).\n"
+            "Only available when a QMini / Qseries spectrometer is connected.")
+        self._sensitivity_check.setChecked(False)
+        self._sensitivity_check.setVisible(False)   # shown only if device supports it
+        self._sensitivity_check.toggled.connect(self._on_sensitivity_toggled)
+        yscale.addWidget(self._sensitivity_check)
         self._ymin_spin = QDoubleSpinBox()
         self._ymin_spin.setRange(-1e6, 1e9)
         self._ymin_spin.setDecimals(0)
@@ -452,6 +465,16 @@ class SpectrometerWidget(QWidget):
 
     # ── Connection ─────────────────────────────────────────────────────────────
 
+    # Maps IntensityUnit integer codes to Y-axis label strings.
+    _INTENSITY_UNIT_LABELS = {
+        1: "Intensity (ADC counts)",
+        2: "Intensity (ADC, normalised)",
+        3: "Intensity (nW/nm)",
+        4: "Intensity (nW/m²/nm)",
+        5: "Intensity (W/sr/m²/nm)",
+        6: "Intensity (W/sr/nm)",
+    }
+
     def _connect_spectrometer(self):
         self.spec = find_spectrometer()
         if self.spec is None:
@@ -464,6 +487,10 @@ class SpectrometerWidget(QWidget):
         self.ax.set_xlim(self.wavelengths[0], self.wavelengths[-1])
         self.exposure_spin.setMinimum(self.spec.min_exposure_time)
         self.exposure_spin.setMaximum(self.spec.max_exposure_time)
+
+        if self.spec.supports_sensitivity_calibration:
+            self._sensitivity_check.setVisible(True)
+
         self.status_message.emit(
             f"Connected: {self.spec.model_name}  |  S/N: {self.spec.serial_number}  |  "
             f"FW: {self.spec.firmware_version}  |  "
@@ -638,18 +665,54 @@ class SpectrometerWidget(QWidget):
         self.ax.set_ylim(self._ymin_spin.value(), self._ymax_spin.value())
         self.canvas.draw_idle()
 
+    def _on_sensitivity_toggled(self, checked):
+        if self.spec is None:
+            return
+        self.spec.sensitivity_calibration = checked
+        # Immediately refresh the Y-axis label to reflect the new unit.
+        # The actual label will be confirmed on the next spectrum update via
+        # the IntensityUnit field returned by the device.
+        label = "Intensity (nW/nm)" if checked else "Intensity (ADC counts)"
+        self.ax.set_ylabel(label)
+        self.canvas.draw_idle()
+
+    def _on_log_y_toggled(self, checked):
+        self.ax.set_yscale("log" if checked else "linear")
+        if checked:
+            # Log axis requires a positive lower bound; enforce it on the manual spinner.
+            self._ymin_spin.setMinimum(0.1)
+            if self._ymin_spin.value() <= 0:
+                self._ymin_spin.setValue(1.0)
+        else:
+            self._ymin_spin.setMinimum(-1e6)
+        if not self._autoscale_check.isChecked():
+            self._apply_ylim()
+        elif self.last_data is not None:
+            self.ax.relim()
+            self.ax.autoscale_view(scalex=False)
+        self.canvas.draw_idle()
+
     def _on_spectrum(self, data):
         self.last_data = data
         self.line.set_data(self.wavelengths, data.spectrum)
+
+        # Keep the Y-axis label in sync with whatever unit the device is reporting.
+        unit_label = self._INTENSITY_UNIT_LABELS.get(
+            data.intensity_unit, f"Intensity (unit {data.intensity_unit})")
+        if self.ax.get_ylabel() != unit_label:
+            self.ax.set_ylabel(unit_label)
 
         # Update ±1σ shaded fill
         if self._std_fill is not None:
             self._std_fill.remove()
             self._std_fill = None
         if data.std is not None and data.averaging > 1:
+            lower = data.spectrum - data.std
+            if self._log_y_check.isChecked():
+                lower = np.maximum(lower, 1e-10)  # keep fill positive for log axis
             self._std_fill = self.ax.fill_between(
                 self.wavelengths,
-                data.spectrum - data.std,
+                lower,
                 data.spectrum + data.std,
                 alpha=0.25,
                 color=self.line.get_color(),
